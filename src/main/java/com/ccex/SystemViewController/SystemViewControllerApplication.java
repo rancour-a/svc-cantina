@@ -11,6 +11,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Scanner;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,9 +36,8 @@ import com.google.common.collect.ImmutableList;
 public class SystemViewControllerApplication {
 
 	final Logger log = LoggerFactory.getLogger(getClass());
-	boolean prettyPrint;
+	boolean prettyPrint, ignoreCaps;
 
-	final static String TREE_ENTRY_POINT = "subviews";
 	final static String[] SELECTORS = new String[] { "class", "classNames", "identifier" };
 
 	@Value("${ccex.jsonToParse.Url}")
@@ -58,10 +59,12 @@ public class SystemViewControllerApplication {
 			// retrieve data file, given parameters
 			byte[] jsonData = getDataFile(parameters);
 
-			Map<String, Set<JsonNode>> selectorMap = new HashMap<>();
+			// pre-map the data
 			JsonNode rootNode = new ObjectMapper().readTree(jsonData);
+			Map<String, Set<JsonNode>> selectorMap = new TreeMap<>();
+
 			// parse the data-file into selectorMap (recursion)
-			traverseNodes(rootNode.path(TREE_ENTRY_POINT).elements(), selectorMap);
+			traverseNodes(rootNode.elements(), selectorMap);
 
 			if (log.isDebugEnabled()) {
 				log.debug("JSON has been parsed and mapped {}", selectorMap);
@@ -72,13 +75,14 @@ public class SystemViewControllerApplication {
 			while (true) {
 				System.out.println("-----------");
 				System.out.print("Selector(s) \"?\" for options : ");
+				// gets rid of whitespace
 				String userInput = scanner.nextLine().trim().replaceAll(" ", "");
 
 				if ("?".equals(userInput)) {
-					System.out.println(" >> \"q\" to quit");
-					System.out.println(" >> \"y\" to PrettyPrint");
-					System.out.println(" >> \"n\" to Not PrettyPrint");
-					System.out.println(" >> \"s\" to display parsed dataStore");
+					System.out.println(" >> \"q\" to (q)uit");
+					System.out.println(" >> \"p\" to toggle (p)retty-print");
+					System.out.println(" >> \"s\" to display parsed data(s)tore");
+					System.out.println(" >> \"c\" to toggle ignore (c)aps");
 					continue;
 				}
 
@@ -86,21 +90,30 @@ public class SystemViewControllerApplication {
 					scanner.close();
 					System.out.println("BYE!");
 					System.exit(0);
-				} else if ("y".equals(userInput)) {
-					prettyPrint = true;
-					System.out.println("PrettyPrint is ON");
-					continue;
-				} else if ("n".equals(userInput)) {
-					prettyPrint = false;
-					System.out.println("PrettyPrint is OFF");
+				} else if ("p".equals(userInput)) {
+					prettyPrint = !prettyPrint;
+					System.out.println("PrettyPrint is " + ((prettyPrint) ? "ON" : "OFF"));
 					continue;
 				} else if ("s".equals(userInput)) {
-					if (!prettyPrint) {
-						System.out.println("Data Store: " + selectorMap);
+					System.out.println("Data Store: " + ((!prettyPrint) ? selectorMap
+							: new ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(selectorMap)));
+					continue;
+				} else if ("c".equals(userInput)) {
+					ignoreCaps = !ignoreCaps;
+					System.out.println("Ignore Caps is " + ((ignoreCaps) ? "ON" : "OFF"));
+
+					Map<String, Set<JsonNode>> temp = new TreeMap<>();
+					temp.putAll(selectorMap);
+
+					if (ignoreCaps) {
+						selectorMap = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
 					} else {
-						System.out.println("Data Store: "
-								+ new ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(selectorMap));
+						selectorMap = new TreeMap<>();
 					}
+
+					selectorMap.putAll(temp);
+					temp = null;
+
 					continue;
 				}
 
@@ -140,7 +153,7 @@ public class SystemViewControllerApplication {
 			throws JsonProcessingException {
 		while (element.hasNext()) {
 			JsonNode node = element.next();
-			// if node is json and hasSelector(s), add to map of selectors
+			// if node is JSON and has selector(s), add to map of selectors
 			if (node.isContainerNode() && !node.isArray()) {
 				getSelector(node).forEach(selector -> addNodeToMap(selector, node, selectorMap));
 			}
@@ -161,8 +174,6 @@ public class SystemViewControllerApplication {
 		}
 	}
 
-
-	@SuppressWarnings("unchecked")
 	private List<String> getSelector(JsonNode element) throws JsonProcessingException {
 
 		// sends Json to map to ease lookup
@@ -174,8 +185,11 @@ public class SystemViewControllerApplication {
 			if (jsonMap.containsKey(selector)) {
 				if (jsonMap.get(selector) instanceof String) {
 					selectorValues.add("" + jsonMap.get(selector));
-				} else { // this case resolves the classNames being arrays instead of strings
-					((ArrayList<String>) jsonMap.get(selector)).forEach(select -> selectorValues.add(select));
+				} else if (jsonMap.get(selector) instanceof ArrayList<?>) { // added additional check
+					@SuppressWarnings("unchecked") // warning unavoidable, but better granularity here than at method
+					// level
+					ArrayList<String> arraySelector = (ArrayList<String>) jsonMap.get(selector);
+					arraySelector.forEach(select -> selectorValues.add(select));
 				}
 			}
 		}
@@ -184,14 +198,14 @@ public class SystemViewControllerApplication {
 
 	public RestTemplate restTemplate() {
 		RestTemplate restTemplate = new RestTemplate();
-		List<HttpMessageConverter<?>> converters = restTemplate.getMessageConverters();
-		for (HttpMessageConverter<?> converter : converters) {
+		for (HttpMessageConverter<?> converter : restTemplate.getMessageConverters()) {
 			if (converter instanceof MappingJackson2HttpMessageConverter) {
 				MappingJackson2HttpMessageConverter jsonConverter = (MappingJackson2HttpMessageConverter) converter;
 				jsonConverter.setObjectMapper(new ObjectMapper());
 				// this allows restTemplate to pull in JSON objects
 				jsonConverter.setSupportedMediaTypes(ImmutableList
 						.of(new MediaType("*", "json", MappingJackson2HttpMessageConverter.DEFAULT_CHARSET)));
+				break;
 			}
 		}
 		return restTemplate;
@@ -205,42 +219,47 @@ public class SystemViewControllerApplication {
 		if (userInput.contains("#")) {
 			inSelectors = Arrays.asList(userInput.split("#"));
 		} else if (userInput.contains(".")) {
-			System.out.println(" Compounding selectors UNSUPPORTED (.)   Sorry.");
-			return;
-			// inSelectors = Arrays.asList(userInput.split("\\."));
+			inSelectors = Arrays.asList(userInput.split("\\."));
 		} else {
 			inSelectors = Arrays.asList(userInput);
 		}
 
 		// combine all JSONs together / set
-		inSelectors.forEach(selection -> {
+		for (String selection : inSelectors) {
 			if (selectorMap.get(selection) != null) {
 				if (log.isDebugEnabled()) {
 					log.debug("[{}] views for selector [{}]", selectorMap.get(selection).size(), selection);
 				}
 				totalSelected.addAll(selectorMap.get(selection));
 			}
-		});
+		}
 
-		// // for compounds (.) filter
-		// if (userInput.contains(".")) {
-		// // traverse the totalSelected JSONS, and make sure all have all the
-		// selectors,
-		// // filtering those out that don't
-		// Set<JsonNode> compoundingList = new HashSet<>();
-		// for (JsonNode node : totalSelected) {
-		// if (isValidNode(node, inSelectors)) {
-		// compoundingList.add(node);
-		// }
-		// }
-		// // filters down
-		// if (!compoundingList.isEmpty()) {
-		// if (log.isDebugEnabled()) {
-		// log.debug("Compounded List: {}", compoundingList);
-		// }
-		// totalSelected.retainAll(compoundingList);
-		// }
-		// }
+		// for compounds (.) filter
+		if (userInput.contains(".")) {
+			boolean firstGo = true;
+			List<JsonNode> compoundingList = new ArrayList<>();
+			for (String selection : inSelectors) {
+				if (selectorMap.get(selection) != null) {
+					if (firstGo) {
+						// need to start somewhere
+						compoundingList.addAll(selectorMap.get(selection));
+						firstGo = false;
+					} else {
+						// filters down, each successive selector
+						compoundingList = compoundingList.stream().filter(selectorMap.get(selection)::contains)
+								.collect(Collectors.toList());
+					}
+				}
+			}
+
+			if (!compoundingList.isEmpty()) {
+				if (log.isDebugEnabled()) {
+					log.debug("Compounded List: {}", compoundingList);
+				}
+				totalSelected = new HashSet<>(compoundingList);
+				compoundingList = null;
+			}
+		}
 
 		// print to STD OUT
 		if (!prettyPrint) {
@@ -252,19 +271,4 @@ public class SystemViewControllerApplication {
 
 	}
 
-	// private boolean isValidNode(JsonNode element, List<String> inSelectors)
-	// throws JsonProcessingException {
-	//
-	// // sends Json to map to ease lookup
-	// Map<String, Object> jsonMap = new ObjectMapper().treeToValue(element,
-	// HashMap.class);
-	//
-	// // search keys
-	// for (String selector : inSelectors) {
-	// if (!jsonMap.containsKey(selector)) {
-	// return false;
-	// }
-	// }
-	// return true;
-	// }
 }
